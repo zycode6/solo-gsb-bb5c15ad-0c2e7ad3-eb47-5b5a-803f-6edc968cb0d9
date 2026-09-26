@@ -6,7 +6,9 @@ from sqlalchemy.orm import Session
 from app import services
 from app.database import get_db
 from app.models import Recipe, RecipeEntry
-from app.schemas import ExpansionOut, RecipeIn, RecipeOut, RecipeSummary
+from app.schemas import (
+    ExpansionOut, LabelPreviewOut, RecipeIn, RecipeOut, RecipeSummary,
+)
 
 router = APIRouter(prefix="/recipes", tags=["配方"])
 
@@ -52,3 +54,9 @@ def replace_recipe(recipe_id: str, payload: RecipeIn, db: Session = Depends(get_
             summary="展开全部引用路径并按过敏原汇总来源（标签核对）")
 def get_expansion(recipe_id: str, db: Session = Depends(get_db)):
     return services.expand_recipe(db, recipe_id)
+
+
+@router.post("/{recipe_id}/label-preview", response_model=LabelPreviewOut,
+             summary="预演整体替换后的标签变化（不写入数据库，校验与保存接口一致）")
+def preview_label(recipe_id: str, payload: RecipeIn, db: Session = Depends(get_db)):
+    return services.preview_label(db, recipe_id, payload)

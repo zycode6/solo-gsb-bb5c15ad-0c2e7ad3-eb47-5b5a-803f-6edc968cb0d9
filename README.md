@@ -52,6 +52,7 @@ pytest                                       # 运行测试
 | GET | `/ingredients` / `/ingredients/{id}` | 查询原料 |
 | POST | `/recipes` | 新建配方（条目按顺序组成，可引用原料或子配方） |
 | PUT | `/recipes/{id}` | 整体替换配方组成 |
+| POST | `/recipes/{id}/label-preview` | **标签预演**：按整体替换的请求体预演标签变化，**不写入数据库** |
 | GET | `/recipes` / `/recipes/{id}` | 查询配方及其条目 |
 | GET | `/recipes/{id}/expansion` | **标签核对**：展开全部引用路径，按过敏原汇总来源 |
 
@@ -111,6 +112,55 @@ curl $B/recipes/REC-0002/expansion
 ]
 ```
 
+## 标签预演：不落库先看标签要不要重印
+
+`POST /recipes/{id}/label-preview` 的请求体与 `PUT /recipes/{id}` **完全相同**，但只做预演、绝不写入数据库：
+
+- **同样的校验**：引用存在性（`400 UNKNOWN_REFERENCE`）、循环引用（`409 CYCLE_DETECTED`）、名称冲突（`409 DUPLICATE_NAME`）、配方不存在（`404 RECIPE_NOT_FOUND`），错误结构与保存接口一致；
+- **同样的展开**：分别展开「当前配方」与「预演配方」的全部原料路径。路径以**每层条目位置**（行号，从 1 开始）组成标识，例如 `[2, 1]` 表示「根配方第 2 行 → 子配方第 1 行」；同一子配方引用多次时行号不同，重复引用会作为不同来源分别保留；
+- **差异结果**：
+  - `added_allergens` / `removed_allergens`：预演后新增 / 消失的过敏原，分别列出预演侧 / 当前侧的全部来源原料与路径；
+  - `changed_allergens`：过敏原仍存在，但来源原料或路径发生了变化，逐项给出变更前后来源：`removed_sources`（原来源）、`added_sources`（变化后来源）、`unchanged_sources`（位置与原料均未变的来源，数量 / 单位变化不视为变化）；
+  - `allergen_list_changed=true`：过敏原名单本身增减，标签文字必然要改，`reprint_recommended=true`；
+  - 仅 `sources_changed=true`：名单未变但溯源来源变了，文字可保持原样，是否重印由工坊按溯源要求自行判断。
+
+以上一节的曲奇为例（`REC-0002`：面粉 + 2 次黄油霜），预演「去掉面粉、两个子配方引用保留」：
+
+```bash
+B=http://localhost:8000
+curl -X POST $B/recipes/REC-0002/label-preview \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "曲奇",
+    "entries": [
+      {"ref_type": "recipe", "ref_id": "REC-0001", "quantity": 1, "unit": "份"},
+      {"ref_type": "recipe", "ref_id": "REC-0001", "quantity": 1, "unit": "份"}
+    ]
+  }'
+```
+
+返回（已省略 `current` / `preview` 两侧完整展开，结构同 `/expansion`，仅路径标识改用每层行号）：
+
+```json
+{
+  "recipe_id": "REC-0002",
+  "current": { "recipe_name": "曲奇", "leaf_count": 5, "paths": ["..."], "allergen_summary": ["..."] },
+  "preview": { "recipe_name": "曲奇", "leaf_count": 4, "paths": ["..."], "allergen_summary": ["..."] },
+  "added_allergens": [],
+  "removed_allergens": [
+    {"allergen": "麸质", "before_sources": [
+      {"path": [1], "steps": [{"position": 1, "ref_id": "ING-0002", "ref_name": "面粉"}],
+       "ingredient_id": "ING-0002", "ingredient_name": "面粉"}]}
+  ],
+  "changed_allergens": [],
+  "allergen_list_changed": true,
+  "sources_changed": false,
+  "reprint_recommended": true
+}
+```
+
+预演不改变数据库：调用后再 `GET $B/recipes/REC-0002`，名称与组成仍为预演前的内容；确认无误后，再用同样的请求体调 `PUT $B/recipes/REC-0002` 正式保存即可。
+
 ## 项目结构
 
 ```
@@ -118,10 +168,10 @@ app/
 ├── main.py            # 应用入口，启动时初始化数据库
 ├── database.py        # 引擎 / 会话 / 建表（DATABASE_URL 可配置）
 ├── models.py          # Ingredient / Recipe / RecipeEntry / 发号器
-├── schemas.py         # 请求与响应模型
-├── services.py        # 校验（引用、循环）、原子保存、展开与过敏原汇总
+├── schemas.py         # 请求与响应模型（含标签预演差异模型）
+├── services.py        # 校验（引用、循环、名称）、原子保存、展开汇总、标签预演与过敏原差异
 └── routers/           # /ingredients、/recipes 路由
-tests/test_api.py      # 12 个行为测试（校验、循环、原子性、展开）
+tests/test_api.py      # 21 个行为测试（校验、循环、原子性、展开、标签预演）
 Dockerfile             # python:3.12-slim，构建时安装依赖
 docker-compose.yml     # 一条命令启动，端口与数据卷在此配置
 ```
