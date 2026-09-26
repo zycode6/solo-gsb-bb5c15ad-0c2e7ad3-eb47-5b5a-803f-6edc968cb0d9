@@ -1,0 +1,15 @@
+services:
+  api:
+    build: .
+    image: label-check-api
+    container_name: label-check-api
+    ports:
+      - "8000:8000"          # 宿主机端口:容器端口，改前一个即可换访问端口
+    environment:
+      DATABASE_URL: sqlite:////data/labels.db
+    volumes:
+      - label-data:/data     # SQLite 数据持久化
+    restart: unless-stopped
+
+volumes:
+  label-data:
