@@ -137,3 +137,30 @@ class ExpansionOut(BaseModel):
     leaf_count: int
     paths: list[LeafPath]
     allergen_summary: list[AllergenSummaryItem]
+
+
+# ---------- 标签变化预演 ----------
+
+class AllergenSourceRef(BaseModel):
+    """一条过敏原来源：来自哪个原料、经由哪条位置路径。"""
+
+    ingredient_id: str
+    ingredient_name: str
+    path: list[int]  # 由每层条目位置组成的路径标识（重复引用各占一条）
+
+
+class AllergenChange(BaseModel):
+    """单个过敏原的变化：变更前后的来源原料与路径。"""
+
+    allergen: str
+    before: list[AllergenSourceRef]
+    after: list[AllergenSourceRef]
+
+
+class LabelPreviewOut(BaseModel):
+    recipe_id: str
+    recipe_name: str   # 当前配方名称
+    preview_name: str  # 预演配方名称
+    added_allergens: list[AllergenChange]    # 新增（before 为空）
+    removed_allergens: list[AllergenChange]  # 移除（after 为空）
+    changed_allergens: list[AllergenChange]  # 仍存在，但来源原料或路径变化

@@ -200,3 +200,175 @@ def test_deep_nesting_expands_full_chain(client):
     assert len(leaf["path"]) == 3  # 三层条目编号依次记录
     assert leaf["allergens"] == ["坚果"]
     assert data["allergen_summary"][0]["allergen"] == "坚果"
+
+
+# ---------- 标签变化预演 ----------
+
+def test_label_preview_added_removed_changed(client):
+    flour = make_ingredient(client, "面粉", ["麸质"])
+    butter = make_ingredient(client, "黄油", ["乳"])
+    margarine = make_ingredient(client, "人造黄油", ["乳"])
+    peanut = make_ingredient(client, "花生酱", ["花生"])
+    recipe = make_recipe(client, "曲奇", [
+        {"ref_type": "ingredient", "ref_id": flour["id"]},
+        {"ref_type": "ingredient", "ref_id": butter["id"]},
+    ])
+
+    resp = client.post(f"/recipes/{recipe['id']}/label-preview", json={
+        "name": "曲奇",
+        "entries": [
+            {"ref_type": "ingredient", "ref_id": margarine["id"]},  # 乳：来源原料变化
+            {"ref_type": "ingredient", "ref_id": peanut["id"]},     # 花生：新增
+        ],
+    })
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["recipe_id"] == recipe["id"]
+    assert data["recipe_name"] == "曲奇"
+    assert data["preview_name"] == "曲奇"
+
+    assert [i["allergen"] for i in data["added_allergens"]] == ["花生"]
+    added = data["added_allergens"][0]
+    assert added["before"] == []
+    assert added["after"] == [
+        {"ingredient_id": peanut["id"], "ingredient_name": "花生酱", "path": [2]}]
+
+    assert [i["allergen"] for i in data["removed_allergens"]] == ["麸质"]
+    removed = data["removed_allergens"][0]
+    assert removed["before"] == [
+        {"ingredient_id": flour["id"], "ingredient_name": "面粉", "path": [1]}]
+    assert removed["after"] == []
+
+    changed = {i["allergen"]: i for i in data["changed_allergens"]}
+    assert set(changed) == {"乳"}
+    assert changed["乳"]["before"] == [
+        {"ingredient_id": butter["id"], "ingredient_name": "黄油", "path": [2]}]
+    assert changed["乳"]["after"] == [
+        {"ingredient_id": margarine["id"], "ingredient_name": "人造黄油", "path": [1]}]
+
+
+def test_label_preview_detects_path_change(client):
+    butter = make_ingredient(client, "黄油", ["乳"])
+    sugar = make_ingredient(client, "砂糖")
+    recipe = make_recipe(client, "霜", [
+        {"ref_type": "ingredient", "ref_id": butter["id"]},  # 位置 1
+        {"ref_type": "ingredient", "ref_id": sugar["id"]},
+    ])
+
+    resp = client.post(f"/recipes/{recipe['id']}/label-preview", json={
+        "name": "霜",
+        "entries": [
+            {"ref_type": "ingredient", "ref_id": sugar["id"]},
+            {"ref_type": "ingredient", "ref_id": butter["id"]},  # 移到位置 2
+        ],
+    })
+    data = resp.json()
+    assert data["added_allergens"] == []
+    assert data["removed_allergens"] == []
+    # 过敏原仍在，但来源路径从 [1] 变为 [2]
+    changed = data["changed_allergens"]
+    assert [c["allergen"] for c in changed] == ["乳"]
+    assert changed[0]["before"][0]["path"] == [1]
+    assert changed[0]["after"][0]["path"] == [2]
+
+
+def test_label_preview_keeps_duplicate_sources_distinct(client):
+    butter = make_ingredient(client, "黄油", ["乳"])
+    cream = make_recipe(client, "黄油霜", [
+        {"ref_type": "ingredient", "ref_id": butter["id"]},
+    ])
+    cookie = make_recipe(client, "曲奇", [
+        {"ref_type": "recipe", "ref_id": cream["id"]},
+    ])
+
+    resp = client.post(f"/recipes/{cookie['id']}/label-preview", json={
+        "name": "曲奇",
+        "entries": [
+            {"ref_type": "recipe", "ref_id": cream["id"]},
+            {"ref_type": "recipe", "ref_id": cream["id"]},  # 重复引用同一子配方
+        ],
+    })
+    data = resp.json()
+    changed = {c["allergen"]: c for c in data["changed_allergens"]}
+    milk = changed["乳"]
+    assert milk["before"] == [
+        {"ingredient_id": butter["id"], "ingredient_name": "黄油", "path": [1, 1]}]
+    # 两次引用以各自的位置路径保留为不同来源
+    assert [s["path"] for s in milk["after"]] == [[1, 1], [2, 1]]
+    assert all(s["ingredient_id"] == butter["id"] for s in milk["after"])
+
+
+def test_label_preview_no_change_gives_empty_groups(client):
+    butter = make_ingredient(client, "黄油", ["乳"])
+    recipe = make_recipe(client, "霜", [
+        {"ref_type": "ingredient", "ref_id": butter["id"]},
+    ])
+    resp = client.post(f"/recipes/{recipe['id']}/label-preview", json={
+        "name": "霜",
+        "entries": [{"ref_type": "ingredient", "ref_id": butter["id"]}],
+    })
+    data = resp.json()
+    assert data["added_allergens"] == []
+    assert data["removed_allergens"] == []
+    assert data["changed_allergens"] == []
+
+
+def test_label_preview_does_not_write(client):
+    butter = make_ingredient(client, "黄油", ["乳"])
+    peanut = make_ingredient(client, "花生酱", ["花生"])
+    recipe = make_recipe(client, "霜", [
+        {"ref_type": "ingredient", "ref_id": butter["id"]},
+    ])
+    before = client.get(f"/recipes/{recipe['id']}").json()
+
+    resp = client.post(f"/recipes/{recipe['id']}/label-preview", json={
+        "name": "新霜",
+        "entries": [{"ref_type": "ingredient", "ref_id": peanut["id"]}],
+    })
+    assert resp.status_code == 200, resp.text
+
+    # 预演后配方名称、条目（含条目编号）完全不变
+    after = client.get(f"/recipes/{recipe['id']}").json()
+    assert after == before
+
+
+def test_label_preview_validation_matches_save(client):
+    butter = make_ingredient(client, "黄油", ["乳"])
+    make_recipe(client, "别的", [])
+    recipe = make_recipe(client, "霜", [
+        {"ref_type": "ingredient", "ref_id": butter["id"]},
+    ])
+
+    # 引用不存在 -> 与保存接口相同的 400
+    resp = client.post(f"/recipes/{recipe['id']}/label-preview", json={
+        "name": "霜",
+        "entries": [{"ref_type": "ingredient", "ref_id": "ING-9999"}],
+    })
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["code"] == "UNKNOWN_REFERENCE"
+
+    # 名称冲突 -> 与保存接口相同的 409
+    resp = client.post(f"/recipes/{recipe['id']}/label-preview", json={
+        "name": "别的", "entries": [],
+    })
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "DUPLICATE_NAME"
+
+    # 循环引用 -> 与保存接口相同的 409
+    resp = client.post(f"/recipes/{recipe['id']}/label-preview", json={
+        "name": "霜",
+        "entries": [{"ref_type": "recipe", "ref_id": recipe["id"]}],
+    })
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "CYCLE_DETECTED"
+
+    # 配方不存在 -> 404
+    resp = client.post("/recipes/REC-9999/label-preview",
+                       json={"name": "x", "entries": []})
+    assert resp.status_code == 404
+    assert resp.json()["detail"]["code"] == "RECIPE_NOT_FOUND"
+
+    # 全部失败后，原配方保持不变
+    after = client.get(f"/recipes/{recipe['id']}").json()
+    assert after["name"] == "霜"
+    assert [e["ref_id"] for e in after["entries"]] == [butter["id"]]
